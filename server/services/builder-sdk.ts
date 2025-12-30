@@ -2,12 +2,12 @@ import { createHash, randomBytes } from "crypto";
 import {
   generateStealthKeyPair,
   generateShieldedAddress,
-  ShieldedAddress,
+  ShieldedAddressLocal as ShieldedAddress,
   StealthKeyPair,
 } from "./shielded-addresses";
 import {
   createPrivatePayment,
-  submitPrivatePayment,
+  verifyPrivatePayment,
   PrivatePayment,
 } from "./private-payments";
 import {
@@ -142,9 +142,9 @@ export class PandoraSDK {
         memo
       );
       
-      const result = submitPrivatePayment(payment);
-      if (!result.success) {
-        return { success: false, error: result.error };
+      const verification = verifyPrivatePayment(payment);
+      if (!verification.valid) {
+        return { success: false, error: verification.reason };
       }
       
       return {
