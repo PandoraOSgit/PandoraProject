@@ -11,15 +11,36 @@ import {
   type InsertZkProof,
   type AgentDecision,
   type InsertAgentDecision,
+  type ShieldedAccount,
+  type InsertShieldedAccount,
+  type ShieldedAddress,
+  type InsertShieldedAddress,
+  type PrivatePayment,
+  type InsertPrivatePayment,
+  type ZkBundle,
+  type InsertZkBundle,
+  type ZkBundleItem,
+  type InsertZkBundleItem,
+  type ZkmlModel,
+  type InsertZkmlModel,
+  type ZkmlInferenceProof,
+  type InsertZkmlInferenceProof,
   users,
   agents,
   fleets,
   transactions,
   zkProofs,
   agentDecisions,
+  shieldedAccounts,
+  shieldedAddresses,
+  privatePayments,
+  zkBundles,
+  zkBundleItems,
+  zkmlModels,
+  zkmlInferenceProofs,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, and, sql } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -50,6 +71,47 @@ export interface IStorage {
   
   getDecisionsByAgent(agentId: number): Promise<AgentDecision[]>;
   createAgentDecision(decision: InsertAgentDecision): Promise<AgentDecision>;
+  
+  // Privacy Layer - Shielded Accounts
+  getAllShieldedAccounts(): Promise<ShieldedAccount[]>;
+  getShieldedAccountsByOwner(ownerWallet: string): Promise<ShieldedAccount[]>;
+  getShieldedAccount(id: number): Promise<ShieldedAccount | undefined>;
+  createShieldedAccount(account: InsertShieldedAccount): Promise<ShieldedAccount>;
+  updateShieldedAccount(id: number, data: Partial<ShieldedAccount>): Promise<ShieldedAccount | undefined>;
+  
+  // Privacy Layer - Shielded Addresses
+  getShieldedAddressesByAccount(accountId: number): Promise<ShieldedAddress[]>;
+  getShieldedAddressByPublicAddress(publicAddress: string): Promise<ShieldedAddress | undefined>;
+  createShieldedAddress(address: InsertShieldedAddress): Promise<ShieldedAddress>;
+  updateShieldedAddress(id: number, data: Partial<ShieldedAddress>): Promise<ShieldedAddress | undefined>;
+  getAllShieldedAddresses(ownerWallet?: string): Promise<ShieldedAddress[]>;
+  
+  // Privacy Layer - Private Payments
+  getAllPrivatePayments(): Promise<PrivatePayment[]>;
+  getPrivatePaymentsByStatus(status: string): Promise<PrivatePayment[]>;
+  createPrivatePayment(payment: InsertPrivatePayment): Promise<PrivatePayment>;
+  updatePrivatePayment(id: number, data: Partial<PrivatePayment>): Promise<PrivatePayment | undefined>;
+  getPrivatePaymentByNullifier(nullifier: string): Promise<PrivatePayment | undefined>;
+  
+  // Privacy Layer - ZK Bundles
+  getAllZkBundles(ownerWallet?: string): Promise<ZkBundle[]>;
+  getZkBundle(id: number): Promise<ZkBundle | undefined>;
+  createZkBundle(bundle: InsertZkBundle): Promise<ZkBundle>;
+  updateZkBundle(id: number, data: Partial<ZkBundle>): Promise<ZkBundle | undefined>;
+  createZkBundleItem(item: InsertZkBundleItem): Promise<ZkBundleItem>;
+  getZkBundleItems(bundleId: number): Promise<ZkBundleItem[]>;
+  
+  // Privacy Layer - zkML Models
+  getAllZkmlModels(ownerWallet?: string): Promise<ZkmlModel[]>;
+  getZkmlModel(id: number): Promise<ZkmlModel | undefined>;
+  createZkmlModel(model: InsertZkmlModel): Promise<ZkmlModel>;
+  updateZkmlModel(id: number, data: Partial<ZkmlModel>): Promise<ZkmlModel | undefined>;
+  
+  // Privacy Layer - zkML Inference Proofs
+  getZkmlInferenceProofsByModel(modelId: number): Promise<ZkmlInferenceProof[]>;
+  createZkmlInferenceProof(proof: InsertZkmlInferenceProof): Promise<ZkmlInferenceProof>;
+  updateZkmlInferenceProof(id: number, data: Partial<ZkmlInferenceProof>): Promise<ZkmlInferenceProof | undefined>;
+  getAllZkmlInferenceProofs(): Promise<ZkmlInferenceProof[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -160,6 +222,163 @@ export class DatabaseStorage implements IStorage {
   async createAgentDecision(insertDecision: InsertAgentDecision): Promise<AgentDecision> {
     const [decision] = await db.insert(agentDecisions).values(insertDecision).returning();
     return decision;
+  }
+
+  // Privacy Layer - Shielded Accounts
+  async getAllShieldedAccounts(): Promise<ShieldedAccount[]> {
+    return db.select().from(shieldedAccounts).orderBy(desc(shieldedAccounts.createdAt));
+  }
+  
+  async getShieldedAccountsByOwner(ownerWallet: string): Promise<ShieldedAccount[]> {
+    return db.select().from(shieldedAccounts).where(eq(shieldedAccounts.ownerWallet, ownerWallet)).orderBy(desc(shieldedAccounts.createdAt));
+  }
+
+  async getShieldedAccount(id: number): Promise<ShieldedAccount | undefined> {
+    const [account] = await db.select().from(shieldedAccounts).where(eq(shieldedAccounts.id, id));
+    return account || undefined;
+  }
+
+  async createShieldedAccount(insertAccount: InsertShieldedAccount): Promise<ShieldedAccount> {
+    const [account] = await db.insert(shieldedAccounts).values(insertAccount).returning();
+    return account;
+  }
+
+  async updateShieldedAccount(id: number, data: Partial<ShieldedAccount>): Promise<ShieldedAccount | undefined> {
+    const [account] = await db.update(shieldedAccounts).set(data).where(eq(shieldedAccounts.id, id)).returning();
+    return account || undefined;
+  }
+
+  // Privacy Layer - Shielded Addresses
+  async getShieldedAddressesByAccount(accountId: number): Promise<ShieldedAddress[]> {
+    return db.select().from(shieldedAddresses).where(eq(shieldedAddresses.accountId, accountId)).orderBy(desc(shieldedAddresses.createdAt));
+  }
+
+  async getShieldedAddressByPublicAddress(publicAddress: string): Promise<ShieldedAddress | undefined> {
+    const [address] = await db.select().from(shieldedAddresses).where(eq(shieldedAddresses.publicAddress, publicAddress));
+    return address || undefined;
+  }
+
+  async createShieldedAddress(insertAddress: InsertShieldedAddress): Promise<ShieldedAddress> {
+    const [address] = await db.insert(shieldedAddresses).values(insertAddress).returning();
+    return address;
+  }
+
+  async updateShieldedAddress(id: number, data: Partial<ShieldedAddress>): Promise<ShieldedAddress | undefined> {
+    const [address] = await db.update(shieldedAddresses).set(data).where(eq(shieldedAddresses.id, id)).returning();
+    return address || undefined;
+  }
+
+  async getAllShieldedAddresses(ownerWallet?: string): Promise<ShieldedAddress[]> {
+    if (ownerWallet) {
+      const accounts = await this.getShieldedAccountsByOwner(ownerWallet);
+      const accountIds = accounts.map(a => a.id);
+      if (accountIds.length === 0) return [];
+      const results: ShieldedAddress[] = [];
+      for (const accountId of accountIds) {
+        const addrs = await this.getShieldedAddressesByAccount(accountId);
+        results.push(...addrs);
+      }
+      return results;
+    }
+    return db.select().from(shieldedAddresses).orderBy(desc(shieldedAddresses.createdAt));
+  }
+
+  // Privacy Layer - Private Payments
+  async getAllPrivatePayments(): Promise<PrivatePayment[]> {
+    return db.select().from(privatePayments).orderBy(desc(privatePayments.createdAt));
+  }
+
+  async getPrivatePaymentsByStatus(status: string): Promise<PrivatePayment[]> {
+    return db.select().from(privatePayments).where(eq(privatePayments.status, status)).orderBy(desc(privatePayments.createdAt));
+  }
+
+  async createPrivatePayment(insertPayment: InsertPrivatePayment): Promise<PrivatePayment> {
+    const [payment] = await db.insert(privatePayments).values(insertPayment).returning();
+    return payment;
+  }
+
+  async updatePrivatePayment(id: number, data: Partial<PrivatePayment>): Promise<PrivatePayment | undefined> {
+    const [payment] = await db.update(privatePayments).set(data).where(eq(privatePayments.id, id)).returning();
+    return payment || undefined;
+  }
+
+  async getPrivatePaymentByNullifier(nullifier: string): Promise<PrivatePayment | undefined> {
+    const [payment] = await db.select().from(privatePayments).where(eq(privatePayments.nullifier, nullifier));
+    return payment || undefined;
+  }
+
+  // Privacy Layer - ZK Bundles
+  async getAllZkBundles(ownerWallet?: string): Promise<ZkBundle[]> {
+    if (ownerWallet) {
+      return db.select().from(zkBundles).where(eq(zkBundles.ownerWallet, ownerWallet)).orderBy(desc(zkBundles.createdAt));
+    }
+    return db.select().from(zkBundles).orderBy(desc(zkBundles.createdAt));
+  }
+
+  async getZkBundle(id: number): Promise<ZkBundle | undefined> {
+    const [bundle] = await db.select().from(zkBundles).where(eq(zkBundles.id, id));
+    return bundle || undefined;
+  }
+
+  async createZkBundle(insertBundle: InsertZkBundle): Promise<ZkBundle> {
+    const [bundle] = await db.insert(zkBundles).values(insertBundle).returning();
+    return bundle;
+  }
+
+  async updateZkBundle(id: number, data: Partial<ZkBundle>): Promise<ZkBundle | undefined> {
+    const [bundle] = await db.update(zkBundles).set(data).where(eq(zkBundles.id, id)).returning();
+    return bundle || undefined;
+  }
+
+  async createZkBundleItem(insertItem: InsertZkBundleItem): Promise<ZkBundleItem> {
+    const [item] = await db.insert(zkBundleItems).values(insertItem).returning();
+    return item;
+  }
+
+  async getZkBundleItems(bundleId: number): Promise<ZkBundleItem[]> {
+    return db.select().from(zkBundleItems).where(eq(zkBundleItems.bundleId, bundleId)).orderBy(zkBundleItems.leafIndex);
+  }
+
+  // Privacy Layer - zkML Models
+  async getAllZkmlModels(ownerWallet?: string): Promise<ZkmlModel[]> {
+    if (ownerWallet) {
+      return db.select().from(zkmlModels).where(eq(zkmlModels.ownerWallet, ownerWallet)).orderBy(desc(zkmlModels.createdAt));
+    }
+    return db.select().from(zkmlModels).orderBy(desc(zkmlModels.createdAt));
+  }
+
+  async getZkmlModel(id: number): Promise<ZkmlModel | undefined> {
+    const [model] = await db.select().from(zkmlModels).where(eq(zkmlModels.id, id));
+    return model || undefined;
+  }
+
+  async createZkmlModel(insertModel: InsertZkmlModel): Promise<ZkmlModel> {
+    const [model] = await db.insert(zkmlModels).values(insertModel).returning();
+    return model;
+  }
+
+  async updateZkmlModel(id: number, data: Partial<ZkmlModel>): Promise<ZkmlModel | undefined> {
+    const [model] = await db.update(zkmlModels).set(data).where(eq(zkmlModels.id, id)).returning();
+    return model || undefined;
+  }
+
+  // Privacy Layer - zkML Inference Proofs
+  async getZkmlInferenceProofsByModel(modelId: number): Promise<ZkmlInferenceProof[]> {
+    return db.select().from(zkmlInferenceProofs).where(eq(zkmlInferenceProofs.modelId, modelId)).orderBy(desc(zkmlInferenceProofs.createdAt));
+  }
+
+  async createZkmlInferenceProof(insertProof: InsertZkmlInferenceProof): Promise<ZkmlInferenceProof> {
+    const [proof] = await db.insert(zkmlInferenceProofs).values(insertProof).returning();
+    return proof;
+  }
+
+  async updateZkmlInferenceProof(id: number, data: Partial<ZkmlInferenceProof>): Promise<ZkmlInferenceProof | undefined> {
+    const [proof] = await db.update(zkmlInferenceProofs).set(data).where(eq(zkmlInferenceProofs.id, id)).returning();
+    return proof || undefined;
+  }
+
+  async getAllZkmlInferenceProofs(): Promise<ZkmlInferenceProof[]> {
+    return db.select().from(zkmlInferenceProofs).orderBy(desc(zkmlInferenceProofs.createdAt));
   }
 }
 
