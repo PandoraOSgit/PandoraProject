@@ -13,6 +13,37 @@ import { getMemeCoinOpportunities, analyzeMemeCoins, executeMemeTradeForAgent } 
 import { getSwapQuote } from "./services/jupiter-swap";
 import { generateAgentConfig, getProviderDisplayName } from "./services/multi-ai-provider";
 import type { AIProvider } from "@shared/schema";
+import {
+  generateStealthKeyPair,
+  generateShieldedAddress,
+  listShieldedAddresses,
+  registerShieldedAddress,
+} from "./services/shielded-addresses";
+import {
+  createPrivatePayment,
+  submitPrivatePayment,
+  listPrivatePayments,
+  getPaymentPoolStats,
+  verifyPrivatePayment,
+} from "./services/private-payments";
+import {
+  createTransactionBundle,
+  submitBundle,
+  listBundles,
+  getBundlingStats,
+  verifyBundle,
+} from "./services/zk-bundling";
+import { createSDK, SDKVersion } from "./services/builder-sdk";
+import {
+  listModelTemplates,
+  createFromTemplate,
+  registerModel,
+  listModels,
+  generateInferenceProof,
+  verifyInferenceProof,
+  getZkMLStats,
+  getModel,
+} from "./services/zkml-templates";
 
 export async function registerRoutes(server: Server, app: Express): Promise<void> {
   app.get("/api/agents", async (req, res) => {
@@ -991,6 +1022,255 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     } catch (error) {
       console.error("Error getting Jupiter quote:", error);
       res.status(500).json({ error: "Failed to get swap quote" });
+    }
+  });
+
+  // ============ ZK PRIVACY LAYER ROUTES ============
+
+  // Shielded Addresses
+  app.post("/api/privacy/generate-keys", async (_req, res) => {
+    try {
+      const keyPair = generateStealthKeyPair();
+      const shieldedAddress = generateShieldedAddress(
+        keyPair.viewingPublicKey,
+        keyPair.spendingPublicKey
+      );
+      registerShieldedAddress(shieldedAddress);
+      
+      res.json({
+        keyPair: {
+          viewingPublicKey: keyPair.viewingPublicKey,
+          spendingPublicKey: keyPair.spendingPublicKey,
+        },
+        shieldedAddress,
+      });
+    } catch (error) {
+      console.error("Error generating shielded keys:", error);
+      res.status(500).json({ error: "Failed to generate shielded keys" });
+    }
+  });
+
+  app.get("/api/privacy/shielded-addresses", async (_req, res) => {
+    try {
+      const addresses = listShieldedAddresses();
+      res.json(addresses);
+    } catch (error) {
+      console.error("Error listing shielded addresses:", error);
+      res.status(500).json({ error: "Failed to list shielded addresses" });
+    }
+  });
+
+  // Private Payments
+  app.post("/api/privacy/payments", async (req, res) => {
+    try {
+      const { senderPrivateKey, recipientAddress, amount, memo } = req.body;
+      
+      if (!senderPrivateKey || !recipientAddress || !amount) {
+        return res.status(400).json({ error: "senderPrivateKey, recipientAddress, and amount are required" });
+      }
+      
+      const payment = createPrivatePayment(senderPrivateKey, recipientAddress, amount, memo);
+      const result = submitPrivatePayment(payment);
+      
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+      
+      res.json({ payment, submitted: true });
+    } catch (error) {
+      console.error("Error creating private payment:", error);
+      res.status(500).json({ error: "Failed to create private payment" });
+    }
+  });
+
+  app.get("/api/privacy/payments", async (_req, res) => {
+    try {
+      const payments = listPrivatePayments();
+      res.json(payments);
+    } catch (error) {
+      console.error("Error listing private payments:", error);
+      res.status(500).json({ error: "Failed to list private payments" });
+    }
+  });
+
+  app.get("/api/privacy/payments/stats", async (_req, res) => {
+    try {
+      const stats = getPaymentPoolStats();
+      res.json(stats);
+    } catch (error) {
+      console.error("Error getting payment stats:", error);
+      res.status(500).json({ error: "Failed to get payment stats" });
+    }
+  });
+
+  // ZK Transaction Bundling
+  app.post("/api/privacy/bundles", async (req, res) => {
+    try {
+      const { transactions } = req.body;
+      
+      if (!transactions || !Array.isArray(transactions) || transactions.length === 0) {
+        return res.status(400).json({ error: "transactions array is required" });
+      }
+      
+      const bundle = createTransactionBundle(transactions);
+      const result = submitBundle(bundle);
+      
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+      
+      res.json({ bundle, submitted: true });
+    } catch (error) {
+      console.error("Error creating bundle:", error);
+      res.status(500).json({ error: "Failed to create transaction bundle" });
+    }
+  });
+
+  app.get("/api/privacy/bundles", async (_req, res) => {
+    try {
+      const bundles = listBundles();
+      res.json(bundles);
+    } catch (error) {
+      console.error("Error listing bundles:", error);
+      res.status(500).json({ error: "Failed to list bundles" });
+    }
+  });
+
+  app.get("/api/privacy/bundles/stats", async (_req, res) => {
+    try {
+      const stats = getBundlingStats();
+      res.json(stats);
+    } catch (error) {
+      console.error("Error getting bundling stats:", error);
+      res.status(500).json({ error: "Failed to get bundling stats" });
+    }
+  });
+
+  app.post("/api/privacy/bundles/verify", async (req, res) => {
+    try {
+      const { bundle } = req.body;
+      if (!bundle) {
+        return res.status(400).json({ error: "bundle is required" });
+      }
+      
+      const result = verifyBundle(bundle);
+      res.json(result);
+    } catch (error) {
+      console.error("Error verifying bundle:", error);
+      res.status(500).json({ error: "Failed to verify bundle" });
+    }
+  });
+
+  // Builder SDK Info
+  app.get("/api/sdk/info", async (_req, res) => {
+    try {
+      res.json({
+        version: SDKVersion,
+        features: [
+          "shielded_addresses",
+          "private_payments",
+          "zk_bundling",
+          "zkml_templates",
+          "multi_ai_agents",
+        ],
+        networks: ["mainnet", "devnet", "testnet"],
+        aiProviders: ["openai", "gemini", "anthropic"],
+      });
+    } catch (error) {
+      console.error("Error getting SDK info:", error);
+      res.status(500).json({ error: "Failed to get SDK info" });
+    }
+  });
+
+  // zkML Templates
+  app.get("/api/zkml/templates", async (_req, res) => {
+    try {
+      const templates = listModelTemplates();
+      res.json(templates);
+    } catch (error) {
+      console.error("Error listing zkML templates:", error);
+      res.status(500).json({ error: "Failed to list zkML templates" });
+    }
+  });
+
+  app.post("/api/zkml/models", async (req, res) => {
+    try {
+      const { templateType, name, configOverrides } = req.body;
+      
+      if (!templateType || !name) {
+        return res.status(400).json({ error: "templateType and name are required" });
+      }
+      
+      const model = createFromTemplate(templateType, name, configOverrides);
+      registerModel(model);
+      
+      res.json(model);
+    } catch (error) {
+      console.error("Error creating zkML model:", error);
+      res.status(500).json({ error: "Failed to create zkML model" });
+    }
+  });
+
+  app.get("/api/zkml/models", async (_req, res) => {
+    try {
+      const models = listModels();
+      res.json(models);
+    } catch (error) {
+      console.error("Error listing zkML models:", error);
+      res.status(500).json({ error: "Failed to list zkML models" });
+    }
+  });
+
+  app.post("/api/zkml/inference", async (req, res) => {
+    try {
+      const { modelId, input } = req.body;
+      
+      if (!modelId || !input) {
+        return res.status(400).json({ error: "modelId and input are required" });
+      }
+      
+      const model = getModel(modelId);
+      if (!model) {
+        return res.status(404).json({ error: "Model not found" });
+      }
+      
+      const proof = generateInferenceProof(model, input);
+      const verification = verifyInferenceProof(proof, model);
+      
+      res.json({ proof, verification });
+    } catch (error) {
+      console.error("Error running zkML inference:", error);
+      res.status(500).json({ error: "Failed to run zkML inference" });
+    }
+  });
+
+  app.get("/api/zkml/stats", async (_req, res) => {
+    try {
+      const stats = getZkMLStats();
+      res.json(stats);
+    } catch (error) {
+      console.error("Error getting zkML stats:", error);
+      res.status(500).json({ error: "Failed to get zkML stats" });
+    }
+  });
+
+  // Privacy Layer Overview Stats
+  app.get("/api/privacy/stats", async (_req, res) => {
+    try {
+      const paymentStats = getPaymentPoolStats();
+      const bundlingStats = getBundlingStats();
+      const zkmlStats = getZkMLStats();
+      const shieldedAddresses = listShieldedAddresses();
+      
+      res.json({
+        shieldedAddresses: shieldedAddresses.length,
+        payments: paymentStats,
+        bundling: bundlingStats,
+        zkml: zkmlStats,
+      });
+    } catch (error) {
+      console.error("Error getting privacy stats:", error);
+      res.status(500).json({ error: "Failed to get privacy stats" });
     }
   });
 }
