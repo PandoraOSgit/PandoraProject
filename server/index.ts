@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { startAutonomousScheduler } from "./services/autonomous-scheduler";
+import { migrateUnencryptedKeys } from "./services/shielded-addresses";
 
 const app = express();
 const httpServer = createServer(app);
@@ -92,8 +93,16 @@ app.use((req, res, next) => {
       host: "0.0.0.0",
       reusePort: true,
     },
-    () => {
+    async () => {
       log(`serving on port ${port}`);
+      
+      // Run security migrations on startup
+      try {
+        const migrationResult = await migrateUnencryptedKeys();
+        log(`Privacy key migration: ${migrationResult.migrated} migrated, ${migrationResult.skipped} already encrypted`, "security");
+      } catch (e) {
+        log("Privacy key migration failed - continuing with startup", "security");
+      }
       
       startAutonomousScheduler();
       log("Autonomous agent scheduler started");
