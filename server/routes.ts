@@ -16,15 +16,18 @@ import type { AIProvider } from "@shared/schema";
 import {
   generateStealthKeyPair,
   generateShieldedAddress,
-  listShieldedAddresses,
-  registerShieldedAddress,
+  createShieldedAccountWithKeys,
+  generateAndSaveShieldedAddress,
+  listShieldedAddressesFromDB,
+  getShieldedAccountsByOwner,
 } from "./services/shielded-addresses";
 import {
   createPrivatePayment,
-  submitPrivatePayment,
-  listPrivatePayments,
-  getPaymentPoolStats,
   verifyPrivatePayment,
+  createAndSavePrivatePayment,
+  listPrivatePaymentsFromDB,
+  getPaymentPoolStatsFromDB,
+  confirmPrivatePaymentInDB,
 } from "./services/private-payments";
 import {
   createTransactionBundle,
@@ -44,6 +47,13 @@ import {
   getZkMLStats,
   getModel,
 } from "./services/zkml-templates";
+import {
+  generateSolanaStealthKeyPair,
+  deriveStealthAddress,
+  serializeStealthKeyPair,
+  getStealthTransferInfo,
+  verifyECDHRoundTrip,
+} from "./services/solana-stealth";
 
 export async function registerRoutes(server: Server, app: Express): Promise<void> {
   app.get("/api/agents", async (req, res) => {
@@ -1027,32 +1037,50 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
 
   // ============ ZK PRIVACY LAYER ROUTES ============
 
-  // Shielded Addresses
-  app.post("/api/privacy/generate-keys", async (_req, res) => {
+  // Shielded Addresses - Database-backed
+  app.post("/api/privacy/generate-keys", async (req, res) => {
     try {
-      const keyPair = generateStealthKeyPair();
-      const shieldedAddress = generateShieldedAddress(
-        keyPair.viewingPublicKey,
-        keyPair.spendingPublicKey
-      );
-      registerShieldedAddress(shieldedAddress);
+      const { ownerWallet } = req.body;
       
-      res.json({
-        keyPair: {
-          viewingPublicKey: keyPair.viewingPublicKey,
-          spendingPublicKey: keyPair.spendingPublicKey,
-        },
-        shieldedAddress,
-      });
+      if (ownerWallet) {
+        // Save to database
+        const { account, keyPair } = await createShieldedAccountWithKeys(ownerWallet);
+        const shieldedAddress = await generateAndSaveShieldedAddress(account.id);
+        
+        res.json({
+          keyPair: {
+            viewingPublicKey: keyPair.viewingPublicKey,
+            spendingPublicKey: keyPair.spendingPublicKey,
+          },
+          account,
+          shieldedAddress,
+        });
+      } else {
+        // In-memory generation for compatibility
+        const keyPair = generateStealthKeyPair();
+        const shieldedAddress = generateShieldedAddress(
+          keyPair.viewingPublicKey,
+          keyPair.spendingPublicKey
+        );
+        
+        res.json({
+          keyPair: {
+            viewingPublicKey: keyPair.viewingPublicKey,
+            spendingPublicKey: keyPair.spendingPublicKey,
+          },
+          shieldedAddress,
+        });
+      }
     } catch (error) {
       console.error("Error generating shielded keys:", error);
       res.status(500).json({ error: "Failed to generate shielded keys" });
     }
   });
 
-  app.get("/api/privacy/shielded-addresses", async (_req, res) => {
+  app.get("/api/privacy/shielded-addresses", async (req, res) => {
     try {
-      const addresses = listShieldedAddresses();
+      const ownerWallet = req.query.owner as string | undefined;
+      const addresses = await listShieldedAddressesFromDB(ownerWallet);
       res.json(addresses);
     } catch (error) {
       console.error("Error listing shielded addresses:", error);
@@ -1060,32 +1088,45 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     }
   });
 
-  // Private Payments
+  // Private Payments - Database-backed
   app.post("/api/privacy/payments", async (req, res) => {
     try {
-      const { senderPrivateKey, recipientAddress, amount, memo } = req.body;
+      const { senderAccountId, recipientAddressId, amount, memo, senderSpendingKey } = req.body;
       
-      if (!senderPrivateKey || !recipientAddress || !amount) {
-        return res.status(400).json({ error: "senderPrivateKey, recipientAddress, and amount are required" });
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Valid positive amount is required" });
       }
       
-      const payment = createPrivatePayment(senderPrivateKey, recipientAddress, amount, memo);
-      const result = submitPrivatePayment(payment);
-      
-      if (!result.success) {
-        return res.status(400).json({ error: result.error });
+      // senderSpendingKey is required for deterministic nullifier derivation and double-spend protection
+      if (!senderSpendingKey || typeof senderSpendingKey !== "string" || senderSpendingKey.length < 32) {
+        return res.status(400).json({ error: "senderSpendingKey is required (min 32 chars) for secure double-spend protection" });
       }
       
-      res.json({ payment, submitted: true });
-    } catch (error) {
+      const payment = await createAndSavePrivatePayment(
+        senderAccountId || null, 
+        recipientAddressId || null, 
+        amount, 
+        memo,
+        senderSpendingKey
+      );
+      
+      // Confirm the payment with verification
+      const confirmResult = await confirmPrivatePaymentInDB(payment.id);
+      
+      if (!confirmResult.success) {
+        return res.status(400).json({ error: confirmResult.error, payment });
+      }
+      
+      res.json({ payment: confirmResult.payment, submitted: true });
+    } catch (error: any) {
       console.error("Error creating private payment:", error);
-      res.status(500).json({ error: "Failed to create private payment" });
+      res.status(500).json({ error: error.message || "Failed to create private payment" });
     }
   });
 
   app.get("/api/privacy/payments", async (_req, res) => {
     try {
-      const payments = listPrivatePayments();
+      const payments = await listPrivatePaymentsFromDB();
       res.json(payments);
     } catch (error) {
       console.error("Error listing private payments:", error);
@@ -1095,7 +1136,7 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
 
   app.get("/api/privacy/payments/stats", async (_req, res) => {
     try {
-      const stats = getPaymentPoolStats();
+      const stats = await getPaymentPoolStatsFromDB();
       res.json(stats);
     } catch (error) {
       console.error("Error getting payment stats:", error);
@@ -1172,6 +1213,7 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
           "zk_bundling",
           "zkml_templates",
           "multi_ai_agents",
+          "solana_stealth_transfers",
         ],
         networks: ["mainnet", "devnet", "testnet"],
         aiProviders: ["openai", "gemini", "anthropic"],
@@ -1179,6 +1221,67 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     } catch (error) {
       console.error("Error getting SDK info:", error);
       res.status(500).json({ error: "Failed to get SDK info" });
+    }
+  });
+
+  // Solana Stealth Transfer Routes
+  app.get("/api/stealth/info", async (_req, res) => {
+    try {
+      const info = getStealthTransferInfo();
+      const ecdhVerification = verifyECDHRoundTrip();
+      res.json({ ...info, ecdhVerification });
+    } catch (error) {
+      console.error("Error getting stealth transfer info:", error);
+      res.status(500).json({ error: "Failed to get stealth transfer info" });
+    }
+  });
+
+  app.post("/api/stealth/generate-keypair", async (_req, res) => {
+    try {
+      const keyPair = generateSolanaStealthKeyPair();
+      const serialized = serializeStealthKeyPair(keyPair);
+      
+      res.json({
+        viewingPublicKey: serialized.viewingPublicKey,
+        spendingPublicKey: serialized.spendingPublicKey,
+        encryptedViewingPrivateKey: serialized.encryptedViewingPrivateKey,
+        encryptedSpendingPrivateKey: serialized.encryptedSpendingPrivateKey,
+        message: "Ed25519 stealth keypair generated. Private keys are encrypted with AES-256-GCM.",
+      });
+    } catch (error) {
+      console.error("Error generating stealth keypair:", error);
+      res.status(500).json({ error: "Failed to generate stealth keypair" });
+    }
+  });
+
+  app.post("/api/stealth/derive-address", async (req, res) => {
+    try {
+      const { viewingPublicKey, spendingPublicKey } = req.body;
+      
+      if (!viewingPublicKey || !spendingPublicKey) {
+        return res.status(400).json({ error: "viewingPublicKey and spendingPublicKey are required" });
+      }
+      
+      const { Keypair } = await import("@solana/web3.js");
+      const ephemeralKeypair = Keypair.generate();
+      const viewingPubkey = new PublicKey(viewingPublicKey);
+      const spendingPubkey = new PublicKey(spendingPublicKey);
+      
+      const stealthAddress = deriveStealthAddress(
+        viewingPubkey,
+        spendingPubkey,
+        ephemeralKeypair
+      );
+      
+      res.json({
+        stealthAddress: stealthAddress.address,
+        ephemeralPublicKey: stealthAddress.ephemeralPublicKey,
+        encryptedMeta: stealthAddress.encryptedMeta,
+        message: "Stealth address derived using Ed25519 key exchange",
+      });
+    } catch (error) {
+      console.error("Error deriving stealth address:", error);
+      res.status(500).json({ error: "Failed to derive stealth address" });
     }
   });
 
@@ -1257,10 +1360,10 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
   // Privacy Layer Overview Stats
   app.get("/api/privacy/stats", async (_req, res) => {
     try {
-      const paymentStats = getPaymentPoolStats();
+      const paymentStats = await getPaymentPoolStatsFromDB();
       const bundlingStats = getBundlingStats();
       const zkmlStats = getZkMLStats();
-      const shieldedAddresses = listShieldedAddresses();
+      const shieldedAddresses = await listShieldedAddressesFromDB();
       
       res.json({
         shieldedAddresses: shieldedAddresses.length,
