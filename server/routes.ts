@@ -1285,6 +1285,143 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     }
   });
 
+  // Recover stealth address and check balance
+  app.post("/api/stealth/recover", async (req, res) => {
+    try {
+      const { encryptedViewingPrivateKey, encryptedSpendingPrivateKey, ephemeralPublicKey } = req.body;
+      
+      if (!encryptedViewingPrivateKey || !encryptedSpendingPrivateKey || !ephemeralPublicKey) {
+        return res.status(400).json({ 
+          error: "encryptedViewingPrivateKey, encryptedSpendingPrivateKey, and ephemeralPublicKey are required" 
+        });
+      }
+      
+      const { recoverStealthKeypair } = await import("./services/solana-stealth");
+      const { Connection, PublicKey: SolPubKey, LAMPORTS_PER_SOL } = await import("@solana/web3.js");
+      const { createHash, createDecipheriv } = await import("crypto");
+      
+      // Decrypt function (same as in solana-stealth.ts)
+      const decryptData = (encryptedData: string): string => {
+        const encKey = process.env.WALLET_ENCRYPTION_KEY;
+        if (!encKey) throw new Error("WALLET_ENCRYPTION_KEY required");
+        const key = createHash("sha256").update(encKey).digest();
+        const parts = encryptedData.split(":");
+        if (parts.length !== 3) throw new Error("Invalid encrypted data format");
+        const [ivHex, authTagHex, encrypted] = parts;
+        const iv = Buffer.from(ivHex, "hex");
+        const authTag = Buffer.from(authTagHex, "hex");
+        const decipher = createDecipheriv("aes-256-gcm", key, iv);
+        decipher.setAuthTag(authTag);
+        let decrypted = decipher.update(encrypted, "hex", "utf8");
+        decrypted += decipher.final("utf8");
+        return decrypted;
+      };
+      
+      // Decrypt the private keys directly
+      const viewingSecretKeyHex = decryptData(encryptedViewingPrivateKey);
+      const spendingSecretKeyHex = decryptData(encryptedSpendingPrivateKey);
+      
+      // Convert from hex to Uint8Array (64 bytes each)
+      const viewingSecretKey = Buffer.from(viewingSecretKeyHex, "hex");
+      const spendingSecretKey = Buffer.from(spendingSecretKeyHex, "hex");
+      
+      const ephemeralPubkey = new SolPubKey(ephemeralPublicKey);
+      
+      // Recover the stealth keypair using first 32 bytes (seed) of each key
+      const stealthKeypair = recoverStealthKeypair(
+        viewingSecretKey.slice(0, 32),
+        spendingSecretKey.slice(0, 32),
+        ephemeralPubkey
+      );
+      
+      // Check balance on mainnet
+      const connection = new Connection("https://api.mainnet-beta.solana.com", "confirmed");
+      const balance = await connection.getBalance(stealthKeypair.publicKey);
+      
+      res.json({
+        stealthAddress: stealthKeypair.publicKey.toBase58(),
+        balanceLamports: balance,
+        balanceSOL: balance / LAMPORTS_PER_SOL,
+        canWithdraw: balance > 5000, // Need at least 5000 lamports for tx fee
+        message: balance > 0 ? "Funds found in stealth address!" : "No funds in stealth address",
+      });
+    } catch (error: any) {
+      console.error("Error recovering stealth address:", error);
+      res.status(500).json({ error: error.message || "Failed to recover stealth address" });
+    }
+  });
+
+  // Withdraw from stealth address
+  app.post("/api/stealth/withdraw", async (req, res) => {
+    try {
+      const { 
+        encryptedViewingPrivateKey, 
+        encryptedSpendingPrivateKey, 
+        ephemeralPublicKey,
+        destinationAddress 
+      } = req.body;
+      
+      if (!encryptedViewingPrivateKey || !encryptedSpendingPrivateKey || !ephemeralPublicKey || !destinationAddress) {
+        return res.status(400).json({ 
+          error: "encryptedViewingPrivateKey, encryptedSpendingPrivateKey, ephemeralPublicKey, and destinationAddress are required" 
+        });
+      }
+      
+      const { withdrawFromStealthAddress } = await import("./services/solana-stealth");
+      const { Connection, PublicKey: SolPubKey } = await import("@solana/web3.js");
+      const { createHash, createDecipheriv } = await import("crypto");
+      
+      // Validate destination address
+      try {
+        new SolPubKey(destinationAddress);
+      } catch {
+        return res.status(400).json({ error: "Invalid destination address" });
+      }
+      
+      // Decrypt function
+      const decryptData = (encryptedData: string): string => {
+        const encKey = process.env.WALLET_ENCRYPTION_KEY;
+        if (!encKey) throw new Error("WALLET_ENCRYPTION_KEY required");
+        const key = createHash("sha256").update(encKey).digest();
+        const parts = encryptedData.split(":");
+        if (parts.length !== 3) throw new Error("Invalid encrypted data format");
+        const [ivHex, authTagHex, encrypted] = parts;
+        const iv = Buffer.from(ivHex, "hex");
+        const authTag = Buffer.from(authTagHex, "hex");
+        const decipher = createDecipheriv("aes-256-gcm", key, iv);
+        decipher.setAuthTag(authTag);
+        let decrypted = decipher.update(encrypted, "hex", "utf8");
+        decrypted += decipher.final("utf8");
+        return decrypted;
+      };
+      
+      // Decrypt the private keys directly
+      const viewingSecretKeyHex = decryptData(encryptedViewingPrivateKey);
+      const spendingSecretKeyHex = decryptData(encryptedSpendingPrivateKey);
+      const viewingSecretKey = Buffer.from(viewingSecretKeyHex, "hex");
+      const spendingSecretKey = Buffer.from(spendingSecretKeyHex, "hex");
+      
+      const connection = new Connection("https://api.mainnet-beta.solana.com", "confirmed");
+      
+      const signature = await withdrawFromStealthAddress(
+        connection,
+        viewingSecretKey.slice(0, 32),
+        spendingSecretKey.slice(0, 32),
+        ephemeralPublicKey,
+        destinationAddress
+      );
+      
+      res.json({
+        signature,
+        explorerUrl: `https://solscan.io/tx/${signature}`,
+        message: "Withdrawal successful! Funds transferred to destination address.",
+      });
+    } catch (error: any) {
+      console.error("Error withdrawing from stealth address:", error);
+      res.status(500).json({ error: error.message || "Failed to withdraw from stealth address" });
+    }
+  });
+
   // zkML Templates
   app.get("/api/zkml/templates", async (_req, res) => {
     try {
