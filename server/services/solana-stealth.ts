@@ -175,9 +175,9 @@ export function recoverStealthKeypair(
     ephemeralPublicKey.toBytes()
   );
   
-  const fullSpendingKey = Buffer.alloc(64);
-  Buffer.from(spendingPrivateKey).copy(fullSpendingKey, 0);
-  const spendingPubkey = Keypair.fromSecretKey(fullSpendingKey).publicKey;
+  // Use fromSeed to get the spending public key from the 32-byte seed
+  const spendingKeypair = Keypair.fromSeed(spendingPrivateKey.slice(0, 32) as Uint8Array);
+  const spendingPubkey = spendingKeypair.publicKey;
   
   const stealthSeed = createHash("sha256")
     .update(Buffer.concat([sharedSecret, spendingPubkey.toBytes()]))
