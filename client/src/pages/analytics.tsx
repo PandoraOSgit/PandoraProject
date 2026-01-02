@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -26,8 +27,9 @@ import {
   Legend,
 } from "recharts";
 import { useState } from "react";
-import { BarChart3, TrendingUp, Activity, Shield } from "lucide-react";
+import { BarChart3, TrendingUp, Activity, Shield, Wallet } from "lucide-react";
 import type { Agent, Transaction, ZkProof } from "@shared/schema";
+import { useWallet } from "@/contexts/wallet-context";
 
 const CHART_COLORS = [
   "hsl(255, 75%, 65%)",
@@ -51,18 +53,37 @@ function ChartSkeleton() {
 }
 
 export default function AnalyticsPage() {
+  const { publicKey, connect } = useWallet();
   const [timeRange, setTimeRange] = useState("7d");
 
   const { data: agents, isLoading: agentsLoading } = useQuery<Agent[]>({
-    queryKey: ["/api/agents"],
+    queryKey: ["/api/agents", { owner: publicKey }],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/agents?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const { data: transactions, isLoading: transactionsLoading } = useQuery<Transaction[]>({
-    queryKey: ["/api/transactions"],
+    queryKey: ["/api/transactions", { owner: publicKey }],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/transactions?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const { data: proofs, isLoading: proofsLoading } = useQuery<ZkProof[]>({
-    queryKey: ["/api/zk-proofs"],
+    queryKey: ["/api/zk-proofs", { owner: publicKey }],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/zk-proofs?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const isLoading = agentsLoading || transactionsLoading || proofsLoading;
@@ -109,6 +130,36 @@ export default function AnalyticsPage() {
   const avgSuccessRate = agents?.length
     ? agents.reduce((sum, a) => sum + a.successRate, 0) / agents.length
     : 0;
+
+  if (!publicKey) {
+    return (
+      <div className="p-6 space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground" data-testid="text-analytics-title">
+            Analytics
+          </h1>
+          <p className="text-muted-foreground">
+            Performance metrics and insights across all agents
+          </p>
+        </div>
+        <Card className="backdrop-blur-xl border-border/50">
+          <CardContent className="flex flex-col items-center justify-center py-12 space-y-4">
+            <div className="h-16 w-16 rounded-full bg-primary/20 flex items-center justify-center">
+              <Wallet className="h-8 w-8 text-primary" />
+            </div>
+            <h3 className="text-lg font-semibold text-foreground">Connect Wallet to View</h3>
+            <p className="text-muted-foreground text-center max-w-md">
+              Connect your wallet to view your analytics data
+            </p>
+            <Button onClick={connect} data-testid="button-connect-wallet">
+              <Wallet className="h-4 w-4 mr-2" />
+              Connect Wallet
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">
