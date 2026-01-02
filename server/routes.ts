@@ -2,6 +2,8 @@ import type { Express } from "express";
 import type { Server } from "http";
 import { storage } from "./storage";
 import { insertAgentSchema, insertFleetSchema, insertTransactionSchema, insertZkProofSchema } from "@shared/schema";
+import { authStore, createLoginMessage } from "./services/auth";
+import { requireWalletAuth } from "./middleware/auth";
 import { executeAgentAnalysis, generateAgentRecommendation } from "./services/ai-agent";
 import { getBalance, getSolPrice, getSlotInfo, getNetworkStats, validateAddress, getRecentTransactions } from "./services/solana";
 import { createBalanceProof, createDecisionProof, createStrategyProof, verifyProof } from "./services/zk-proofs";
@@ -9,7 +11,7 @@ import { prepareTransferTransaction, broadcastSignedTransaction, confirmTransact
 import { generateAgentWallet, getAgentKeypair } from "./services/wallet-encryption";
 import { Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL, sendAndConfirmTransaction } from "@solana/web3.js";
 import { getTrendingTokens, getNewLaunches, analyzeToken, isDexScreenerAvailable, type NewTokenLaunch } from "./services/dexscreener";
-import { getMemeCoinOpportunities, analyzeMemeCoins, executeMemeTradeForAgent } from "./services/meme-coin-agent";
+import { getMemeCoinOpportunities, analyzeMemeCoins, executeMemeTradeForAgent, getAgentTokenHoldings, sellAllHoldings, evaluateHoldingsForSell, type MemeTradeDecision } from "./services/meme-coin-agent";
 import { getSwapQuote } from "./services/jupiter-swap";
 import { generateAgentConfig, getProviderDisplayName } from "./services/multi-ai-provider";
 import type { AIProvider } from "@shared/schema";
@@ -56,6 +58,60 @@ import {
 } from "./services/solana-stealth";
 
 export async function registerRoutes(server: Server, app: Express): Promise<void> {
+  // Auth routes
+  app.post("/api/auth/challenge", async (req, res) => {
+    try {
+      const { wallet } = req.body;
+      if (!wallet) {
+        return res.status(400).json({ error: "Wallet address is required" });
+      }
+      const challenge = authStore.generateChallenge(wallet);
+      res.json(challenge);
+    } catch (error) {
+      console.error("Error generating challenge:", error);
+      res.status(500).json({ error: "Failed to generate challenge" });
+    }
+  });
+
+  app.post("/api/auth/verify", async (req, res) => {
+    try {
+      const { wallet, nonce, signature } = req.body;
+      if (!wallet || !nonce || !signature) {
+        return res.status(400).json({ error: "Wallet, nonce, and signature are required" });
+      }
+      const result = authStore.verifySignature(wallet, nonce, signature);
+      if (!result) {
+        return res.status(401).json({ error: "Invalid signature or expired challenge" });
+      }
+      res.json(result);
+    } catch (error) {
+      console.error("Error verifying signature:", error);
+      res.status(500).json({ error: "Failed to verify signature" });
+    }
+  });
+
+  app.post("/api/auth/logout", async (req, res) => {
+    try {
+      const { sessionToken } = req.body;
+      if (sessionToken) {
+        authStore.invalidateSession(sessionToken);
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error during logout:", error);
+      res.status(500).json({ error: "Failed to logout" });
+    }
+  });
+
+  app.get("/api/auth/session", requireWalletAuth, async (req, res) => {
+    try {
+      res.json({ wallet: req.auth!.wallet });
+    } catch (error) {
+      console.error("Error validating session:", error);
+      res.status(500).json({ error: "Failed to validate session" });
+    }
+  });
+
   app.get("/api/agents", async (req, res) => {
     try {
       const ownerWallet = req.query.owner as string | undefined;
@@ -208,7 +264,11 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
 
   app.get("/api/fleets", async (req, res) => {
     try {
-      const fleets = await storage.getAllFleets();
+      const ownerWallet = req.query.owner as string | undefined;
+      if (!ownerWallet) {
+        return res.status(400).json({ error: "owner query parameter is required" });
+      }
+      const fleets = await storage.getAllFleets(ownerWallet);
       res.json(fleets);
     } catch (error) {
       console.error("Error fetching fleets:", error);
@@ -219,9 +279,13 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
   app.get("/api/fleets/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      const ownerWallet = req.query.owner as string | undefined;
       const fleet = await storage.getFleet(id);
       if (!fleet) {
         return res.status(404).json({ error: "Fleet not found" });
+      }
+      if (ownerWallet && fleet.ownerWallet !== ownerWallet) {
+        return res.status(403).json({ error: "Access denied" });
       }
       res.json(fleet);
     } catch (error) {
@@ -236,6 +300,9 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
       if (!result.success) {
         return res.status(400).json({ error: "Invalid request body", details: result.error.format() });
       }
+      if (!result.data.ownerWallet) {
+        return res.status(400).json({ error: "ownerWallet is required" });
+      }
       const fleet = await storage.createFleet(result.data);
       res.status(201).json(fleet);
     } catch (error) {
@@ -247,10 +314,17 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
   app.patch("/api/fleets/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const fleet = await storage.updateFleet(id, req.body);
-      if (!fleet) {
+      const ownerWallet = req.query.owner as string | undefined;
+      
+      const existingFleet = await storage.getFleet(id);
+      if (!existingFleet) {
         return res.status(404).json({ error: "Fleet not found" });
       }
+      if (ownerWallet && existingFleet.ownerWallet !== ownerWallet) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+      
+      const fleet = await storage.updateFleet(id, req.body);
       res.json(fleet);
     } catch (error) {
       console.error("Error updating fleet:", error);
@@ -261,6 +335,16 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
   app.delete("/api/fleets/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      const ownerWallet = req.query.owner as string | undefined;
+      
+      const existingFleet = await storage.getFleet(id);
+      if (!existingFleet) {
+        return res.status(404).json({ error: "Fleet not found" });
+      }
+      if (ownerWallet && existingFleet.ownerWallet !== ownerWallet) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+      
       await storage.deleteFleet(id);
       res.status(204).send();
     } catch (error) {
@@ -269,9 +353,10 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     }
   });
 
-  app.get("/api/transactions", async (req, res) => {
+  app.get("/api/transactions", requireWalletAuth, async (req, res) => {
     try {
-      const transactions = await storage.getAllTransactions();
+      const owner = req.auth!.wallet;
+      const transactions = await storage.getTransactionsByOwner(owner);
       res.json(transactions);
     } catch (error) {
       console.error("Error fetching transactions:", error);
@@ -318,9 +403,10 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     }
   });
 
-  app.get("/api/zk-proofs", async (req, res) => {
+  app.get("/api/zk-proofs", requireWalletAuth, async (req, res) => {
     try {
-      const proofs = await storage.getAllZkProofs();
+      const owner = req.auth!.wallet;
+      const proofs = await storage.getZkProofsByOwner(owner);
       res.json(proofs);
     } catch (error) {
       console.error("Error fetching ZK proofs:", error);
@@ -1006,6 +1092,172 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     } catch (error) {
       console.error("Error executing meme trade:", error);
       res.status(500).json({ error: "Failed to execute meme trade" });
+    }
+  });
+
+  // Get agent's token holdings
+  app.get("/api/agents/:id/holdings", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const ownerWallet = req.query.owner as string;
+      const agent = await storage.getAgent(id);
+      
+      if (!agent) {
+        return res.status(404).json({ error: "Agent not found" });
+      }
+      
+      if (!ownerWallet || agent.ownerWallet !== ownerWallet) {
+        return res.status(403).json({ error: "Access denied - you don't own this agent" });
+      }
+      
+      if (!agent.walletAddress) {
+        return res.status(400).json({ error: "Agent does not have a wallet" });
+      }
+      
+      const holdings = await getAgentTokenHoldings(agent);
+      
+      res.json({
+        agentId: agent.id,
+        agentName: agent.name,
+        walletAddress: agent.walletAddress,
+        holdings,
+      });
+    } catch (error) {
+      console.error("Error getting agent holdings:", error);
+      res.status(500).json({ error: "Failed to get token holdings" });
+    }
+  });
+
+  // Execute a sell for an agent (sell all tokens or specific token)
+  app.post("/api/agents/:id/execute-sell", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const ownerWallet = req.query.owner as string || req.body.ownerWallet;
+      const { tokenMint } = req.body; // Optional: specific token to sell
+      const agent = await storage.getAgent(id);
+      
+      if (!agent) {
+        return res.status(404).json({ error: "Agent not found" });
+      }
+      
+      if (!ownerWallet || agent.ownerWallet !== ownerWallet) {
+        return res.status(403).json({ error: "Access denied - you don't own this agent" });
+      }
+      
+      if (!agent.encryptedPrivateKey) {
+        return res.status(400).json({ error: "Agent does not have a wallet" });
+      }
+
+      // Create a sell decision
+      const sellDecision: MemeTradeDecision = {
+        shouldTrade: true,
+        action: "sell",
+        tokenMint: tokenMint || undefined,
+        confidence: 1.0,
+        reasoning: "Manual sell triggered by owner",
+        riskLevel: "low",
+      };
+      
+      const result = await executeMemeTradeForAgent(agent, sellDecision);
+      
+      res.json({
+        executed: result.success,
+        result,
+        explorerUrl: result.signature ? `https://solscan.io/tx/${result.signature}` : undefined,
+      });
+    } catch (error) {
+      console.error("Error executing sell:", error);
+      res.status(500).json({ error: "Failed to execute sell" });
+    }
+  });
+
+  // Execute SELL ALL for an agent (emergency button)
+  // Accepts holdings array from frontend to avoid re-fetching (which can fail due to rate limits)
+  app.post("/api/agents/:id/sell-all", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const ownerWallet = req.query.owner as string || req.body.ownerWallet;
+      const holdingsToSell = req.body.holdings as Array<{
+        tokenMint: string;
+        tokenSymbol: string;
+        tokenName?: string;
+        quantity: number;
+        currentValueSol: number;
+      }> | undefined;
+      
+      const agent = await storage.getAgent(id);
+      
+      if (!agent) {
+        return res.status(404).json({ error: "Agent not found" });
+      }
+      
+      if (!ownerWallet || agent.ownerWallet !== ownerWallet) {
+        return res.status(403).json({ error: "Access denied - you don't own this agent" });
+      }
+      
+      if (!agent.encryptedPrivateKey) {
+        return res.status(400).json({ error: "Agent does not have a wallet" });
+      }
+
+      console.log(`[API] SELL ALL triggered for agent ${agent.name} by owner`);
+      
+      // If holdings passed from frontend, use them directly (more reliable)
+      if (holdingsToSell && holdingsToSell.length > 0) {
+        console.log(`[API] Using ${holdingsToSell.length} holdings from frontend`);
+        const { sellHoldingsDirectly } = await import("./services/meme-coin-agent");
+        const result = await sellHoldingsDirectly(agent, holdingsToSell);
+        
+        return res.json({
+          success: true,
+          soldCount: result.soldCount,
+          totalSoldSol: result.totalSoldSol,
+          results: result.results,
+        });
+      }
+      
+      // Fallback: fetch from blockchain (may fail due to rate limits)
+      const result = await sellAllHoldings(agent);
+      
+      res.json({
+        success: true,
+        soldCount: result.soldCount,
+        totalSoldSol: result.totalSoldSol,
+        results: result.results,
+      });
+    } catch (error) {
+      console.error("Error executing sell all:", error);
+      res.status(500).json({ error: "Failed to execute sell all" });
+    }
+  });
+
+  // Get holdings with P/L evaluation
+  app.get("/api/agents/:id/holdings-pnl", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const ownerWallet = req.query.owner as string;
+      const agent = await storage.getAgent(id);
+      
+      if (!agent) {
+        return res.status(404).json({ error: "Agent not found" });
+      }
+      
+      if (!ownerWallet || agent.ownerWallet !== ownerWallet) {
+        return res.status(403).json({ error: "Access denied - you don't own this agent" });
+      }
+      
+      const evaluation = await evaluateHoldingsForSell(agent);
+      
+      res.json({
+        agentId: agent.id,
+        agentName: agent.name,
+        holdings: evaluation.holdings,
+        sellCandidates: evaluation.sellCandidates,
+        totalUnrealizedPnlSol: evaluation.totalUnrealizedPnlSol,
+        totalUnrealizedPnlPercent: evaluation.totalUnrealizedPnlPercent,
+      });
+    } catch (error) {
+      console.error("Error getting holdings P/L:", error);
+      res.status(500).json({ error: "Failed to get holdings P/L" });
     }
   });
 
