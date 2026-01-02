@@ -13,8 +13,10 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useState } from "react";
-import { Activity, Search, Filter, CheckCircle, Clock, XCircle } from "lucide-react";
+import { Activity, Search, Filter, CheckCircle, Clock, XCircle, Wallet } from "lucide-react";
 import type { Transaction, Agent } from "@shared/schema";
+import { useWallet } from "@/contexts/wallet-context";
+import { Button } from "@/components/ui/button";
 
 function TransactionSkeleton() {
   return (
@@ -32,16 +34,29 @@ function TransactionSkeleton() {
 }
 
 export default function TransactionsPage() {
+  const { publicKey, connect } = useWallet();
   const [searchQuery, setSearchQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
   const { data: transactions, isLoading } = useQuery<Transaction[]>({
-    queryKey: ["/api/transactions"],
+    queryKey: ["/api/transactions", { owner: publicKey }],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/transactions?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const { data: agents } = useQuery<Agent[]>({
-    queryKey: ["/api/agents"],
+    queryKey: ["/api/agents", { owner: publicKey }],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/agents?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const agentMap = new Map(agents?.map((a) => [a.id, a.name]) || []);
@@ -59,6 +74,36 @@ export default function TransactionsPage() {
   const confirmedCount = transactions?.filter((tx) => tx.status === "confirmed").length || 0;
   const pendingCount = transactions?.filter((tx) => tx.status === "pending").length || 0;
   const failedCount = transactions?.filter((tx) => tx.status === "failed").length || 0;
+
+  if (!publicKey) {
+    return (
+      <div className="p-6 space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground" data-testid="text-transactions-title">
+            Transactions
+          </h1>
+          <p className="text-muted-foreground">
+            Real-time monitoring of on-chain agent actions
+          </p>
+        </div>
+        <Card className="backdrop-blur-xl border-border/50">
+          <CardContent className="flex flex-col items-center justify-center py-12 space-y-4">
+            <div className="h-16 w-16 rounded-full bg-primary/20 flex items-center justify-center">
+              <Wallet className="h-8 w-8 text-primary" />
+            </div>
+            <h3 className="text-lg font-semibold text-foreground">Connect Wallet to View</h3>
+            <p className="text-muted-foreground text-center max-w-md">
+              Connect your wallet to view your transaction history
+            </p>
+            <Button onClick={connect} data-testid="button-connect-wallet">
+              <Wallet className="h-4 w-4 mr-2" />
+              Connect Wallet
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">
