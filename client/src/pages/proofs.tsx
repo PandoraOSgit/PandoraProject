@@ -11,9 +11,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { useState } from "react";
-import { Shield, ShieldCheck, Clock, Search, Filter, Lock } from "lucide-react";
+import { Shield, ShieldCheck, Clock, Search, Filter, Lock, Wallet } from "lucide-react";
 import type { ZkProof, Agent } from "@shared/schema";
+import { useWallet } from "@/contexts/wallet-context";
 
 function ProofCardSkeleton() {
   return (
@@ -41,21 +43,34 @@ function ProofCardSkeleton() {
 }
 
 export default function ProofsPage() {
+  const { publicKey, connect } = useWallet();
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
 
   const { data: proofs, isLoading } = useQuery<ZkProof[]>({
-    queryKey: ["/api/zk-proofs"],
+    queryKey: ["/api/zk-proofs", { owner: publicKey }],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/zk-proofs?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const { data: agents } = useQuery<Agent[]>({
-    queryKey: ["/api/agents"],
+    queryKey: ["/api/agents", { owner: publicKey }],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/agents?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const agentMap = new Map(agents?.map((a) => [a.id, a.name]) || []);
 
-  const proofTypes = [...new Set(proofs?.map((p) => p.proofType) || [])];
+  const proofTypes = Array.from(new Set(proofs?.map((p) => p.proofType) || []));
 
   const filteredProofs = proofs?.filter((proof) => {
     const matchesSearch =
@@ -71,9 +86,40 @@ export default function ProofsPage() {
 
   const verifiedCount = proofs?.filter((p) => p.verified).length || 0;
   const pendingCount = proofs?.filter((p) => !p.verified).length || 0;
-  const avgVerificationTime =
-    proofs?.filter((p) => p.verificationTime).reduce((sum, p) => sum + (p.verificationTime || 0), 0) /
-    (proofs?.filter((p) => p.verificationTime).length || 1) || 0;
+  const proofsWithTime = proofs?.filter((p) => p.verificationTime) || [];
+  const avgVerificationTime = proofsWithTime.length > 0
+    ? proofsWithTime.reduce((sum, p) => sum + (p.verificationTime || 0), 0) / proofsWithTime.length
+    : 0;
+
+  if (!publicKey) {
+    return (
+      <div className="p-6 space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground" data-testid="text-proofs-title">
+            ZK Proofs
+          </h1>
+          <p className="text-muted-foreground">
+            Privacy-preserving zero-knowledge proof verification
+          </p>
+        </div>
+        <Card className="backdrop-blur-xl border-border/50">
+          <CardContent className="flex flex-col items-center justify-center py-12 space-y-4">
+            <div className="h-16 w-16 rounded-full bg-primary/20 flex items-center justify-center">
+              <Wallet className="h-8 w-8 text-primary" />
+            </div>
+            <h3 className="text-lg font-semibold text-foreground">Connect Wallet to View</h3>
+            <p className="text-muted-foreground text-center max-w-md">
+              Connect your wallet to view your ZK proofs
+            </p>
+            <Button onClick={connect} data-testid="button-connect-wallet">
+              <Wallet className="h-4 w-4 mr-2" />
+              Connect Wallet
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-6">
