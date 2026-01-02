@@ -15,9 +15,11 @@ import {
   ArrowRight,
   Plus,
   Network,
+  Wallet,
 } from "lucide-react";
 import { Link } from "wouter";
 import type { Agent, Transaction, Fleet, ZkProof } from "@shared/schema";
+import { useWallet } from "@/contexts/wallet-context";
 
 interface DashboardStats {
   totalAgents: number;
@@ -75,20 +77,46 @@ function AgentCardSkeleton() {
 }
 
 export default function Dashboard() {
+  const { connected, publicKey, connect } = useWallet();
+
   const { data: agents, isLoading: agentsLoading } = useQuery<Agent[]>({
-    queryKey: ["/api/agents"],
+    queryKey: ["/api/agents", publicKey],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/agents?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const { data: transactions, isLoading: transactionsLoading } = useQuery<Transaction[]>({
-    queryKey: ["/api/transactions"],
+    queryKey: ["/api/transactions", { owner: publicKey }],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/transactions?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const { data: fleets } = useQuery<Fleet[]>({
-    queryKey: ["/api/fleets"],
+    queryKey: ["/api/fleets", publicKey],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/fleets?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const { data: proofs } = useQuery<ZkProof[]>({
-    queryKey: ["/api/zk-proofs"],
+    queryKey: ["/api/zk-proofs", { owner: publicKey }],
+    queryFn: async () => {
+      if (!publicKey) return [];
+      const response = await fetch(`/api/zk-proofs?owner=${publicKey}`);
+      return response.json();
+    },
+    enabled: !!publicKey,
   });
 
   const stats: DashboardStats = {
