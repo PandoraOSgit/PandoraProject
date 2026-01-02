@@ -11,6 +11,10 @@ import {
   type InsertZkProof,
   type AgentDecision,
   type InsertAgentDecision,
+  type AgentHolding,
+  type InsertAgentHolding,
+  type TradedTokenHistory,
+  type InsertTradedTokenHistory,
   type ShieldedAccount,
   type InsertShieldedAccount,
   type ShieldedAddress,
@@ -31,6 +35,8 @@ import {
   transactions,
   zkProofs,
   agentDecisions,
+  agentHoldings,
+  tradedTokenHistory,
   shieldedAccounts,
   shieldedAddresses,
   privatePayments,
@@ -53,24 +59,39 @@ export interface IStorage {
   updateAgent(id: number, data: Partial<Agent>): Promise<Agent | undefined>;
   deleteAgent(id: number): Promise<void>;
   
-  getAllFleets(): Promise<Fleet[]>;
+  getAllFleets(ownerWallet?: string): Promise<Fleet[]>;
   getFleet(id: number): Promise<Fleet | undefined>;
   createFleet(fleet: InsertFleet): Promise<Fleet>;
   updateFleet(id: number, data: Partial<Fleet>): Promise<Fleet | undefined>;
   deleteFleet(id: number): Promise<void>;
   
   getAllTransactions(): Promise<Transaction[]>;
+  getTransactionsByOwner(ownerWallet: string): Promise<Transaction[]>;
   getTransactionsByAgent(agentId: number): Promise<Transaction[]>;
   createTransaction(transaction: InsertTransaction): Promise<Transaction>;
   updateTransaction(id: number, data: Partial<Transaction>): Promise<Transaction | undefined>;
   
   getAllZkProofs(): Promise<ZkProof[]>;
+  getZkProofsByOwner(ownerWallet: string): Promise<ZkProof[]>;
   getZkProofsByAgent(agentId: number): Promise<ZkProof[]>;
   createZkProof(proof: InsertZkProof): Promise<ZkProof>;
   updateZkProof(id: number, data: Partial<ZkProof>): Promise<ZkProof | undefined>;
   
   getDecisionsByAgent(agentId: number): Promise<AgentDecision[]>;
   createAgentDecision(decision: InsertAgentDecision): Promise<AgentDecision>;
+  
+  // Agent Holdings - P/L Tracking
+  getAgentHoldings(agentId: number): Promise<AgentHolding[]>;
+  getAgentHoldingByToken(agentId: number, tokenMint: string): Promise<AgentHolding | undefined>;
+  createAgentHolding(holding: InsertAgentHolding): Promise<AgentHolding>;
+  updateAgentHolding(id: number, data: Partial<AgentHolding>): Promise<AgentHolding | undefined>;
+  deleteAgentHolding(id: number): Promise<void>;
+  
+  // Traded Token History - PERMANENT record (never deleted)
+  getTradedTokenHistory(agentId: number): Promise<TradedTokenHistory[]>;
+  getTradedToken(agentId: number, tokenMint: string): Promise<TradedTokenHistory | undefined>;
+  hasAgentTradedToken(agentId: number, tokenMint: string): Promise<boolean>;
+  recordTokenTrade(agentId: number, tokenMint: string, tokenSymbol: string, tokenName: string | null, action: "buy" | "sell", amountSol: number): Promise<TradedTokenHistory>;
   
   // Privacy Layer - Shielded Accounts
   getAllShieldedAccounts(): Promise<ShieldedAccount[]>;
@@ -156,7 +177,10 @@ export class DatabaseStorage implements IStorage {
     await db.delete(agents).where(eq(agents.id, id));
   }
 
-  async getAllFleets(): Promise<Fleet[]> {
+  async getAllFleets(ownerWallet?: string): Promise<Fleet[]> {
+    if (ownerWallet) {
+      return db.select().from(fleets).where(eq(fleets.ownerWallet, ownerWallet)).orderBy(desc(fleets.createdAt));
+    }
     return db.select().from(fleets).orderBy(desc(fleets.createdAt));
   }
 
@@ -183,6 +207,26 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(transactions).orderBy(desc(transactions.createdAt));
   }
 
+  async getTransactionsByOwner(ownerWallet: string): Promise<Transaction[]> {
+    // Get all agents owned by this wallet, then get their transactions
+    const ownerAgents = await db.select({ id: agents.id }).from(agents).where(eq(agents.ownerWallet, ownerWallet));
+    const agentIds = ownerAgents.map(a => a.id);
+    
+    if (agentIds.length === 0) {
+      return [];
+    }
+    
+    // Get transactions for all agents owned by this wallet
+    const allTransactions: Transaction[] = [];
+    for (const agentId of agentIds) {
+      const agentTransactions = await db.select().from(transactions).where(eq(transactions.agentId, agentId));
+      allTransactions.push(...agentTransactions);
+    }
+    
+    // Sort by createdAt descending
+    return allTransactions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
   async getTransactionsByAgent(agentId: number): Promise<Transaction[]> {
     return db.select().from(transactions).where(eq(transactions.agentId, agentId)).orderBy(desc(transactions.createdAt));
   }
@@ -199,6 +243,26 @@ export class DatabaseStorage implements IStorage {
 
   async getAllZkProofs(): Promise<ZkProof[]> {
     return db.select().from(zkProofs).orderBy(desc(zkProofs.createdAt));
+  }
+
+  async getZkProofsByOwner(ownerWallet: string): Promise<ZkProof[]> {
+    // Get all agents owned by this wallet, then get their ZK proofs
+    const ownerAgents = await db.select({ id: agents.id }).from(agents).where(eq(agents.ownerWallet, ownerWallet));
+    const agentIds = ownerAgents.map(a => a.id);
+    
+    if (agentIds.length === 0) {
+      return [];
+    }
+    
+    // Get ZK proofs for all agents owned by this wallet
+    const allProofs: ZkProof[] = [];
+    for (const agentId of agentIds) {
+      const agentProofs = await db.select().from(zkProofs).where(eq(zkProofs.agentId, agentId));
+      allProofs.push(...agentProofs);
+    }
+    
+    // Sort by createdAt descending
+    return allProofs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
   async getZkProofsByAgent(agentId: number): Promise<ZkProof[]> {
@@ -222,6 +286,100 @@ export class DatabaseStorage implements IStorage {
   async createAgentDecision(insertDecision: InsertAgentDecision): Promise<AgentDecision> {
     const [decision] = await db.insert(agentDecisions).values(insertDecision).returning();
     return decision;
+  }
+
+  // Agent Holdings - P/L Tracking
+  async getAgentHoldings(agentId: number): Promise<AgentHolding[]> {
+    return db.select().from(agentHoldings).where(eq(agentHoldings.agentId, agentId)).orderBy(desc(agentHoldings.entryTimestamp));
+  }
+
+  async getAgentHoldingByToken(agentId: number, tokenMint: string): Promise<AgentHolding | undefined> {
+    const [holding] = await db.select().from(agentHoldings).where(
+      and(eq(agentHoldings.agentId, agentId), eq(agentHoldings.tokenMint, tokenMint))
+    );
+    return holding || undefined;
+  }
+
+  async createAgentHolding(insertHolding: InsertAgentHolding): Promise<AgentHolding> {
+    const [holding] = await db.insert(agentHoldings).values(insertHolding).returning();
+    return holding;
+  }
+
+  async updateAgentHolding(id: number, data: Partial<AgentHolding>): Promise<AgentHolding | undefined> {
+    const [holding] = await db.update(agentHoldings).set(data).where(eq(agentHoldings.id, id)).returning();
+    return holding || undefined;
+  }
+
+  async deleteAgentHolding(id: number): Promise<void> {
+    await db.delete(agentHoldings).where(eq(agentHoldings.id, id));
+  }
+
+  // Traded Token History - PERMANENT record of all tokens ever traded (never deleted)
+  async getTradedTokenHistory(agentId: number): Promise<TradedTokenHistory[]> {
+    return db.select().from(tradedTokenHistory)
+      .where(eq(tradedTokenHistory.agentId, agentId))
+      .orderBy(desc(tradedTokenHistory.lastTradedAt));
+  }
+
+  async getTradedToken(agentId: number, tokenMint: string): Promise<TradedTokenHistory | undefined> {
+    const [record] = await db.select().from(tradedTokenHistory)
+      .where(and(
+        eq(tradedTokenHistory.agentId, agentId),
+        eq(tradedTokenHistory.tokenMint, tokenMint)
+      ));
+    return record || undefined;
+  }
+
+  async hasAgentTradedToken(agentId: number, tokenMint: string): Promise<boolean> {
+    const record = await this.getTradedToken(agentId, tokenMint);
+    return !!record;
+  }
+
+  async recordTokenTrade(
+    agentId: number, 
+    tokenMint: string, 
+    tokenSymbol: string, 
+    tokenName: string | null, 
+    action: "buy" | "sell", 
+    amountSol: number
+  ): Promise<TradedTokenHistory> {
+    const existing = await this.getTradedToken(agentId, tokenMint);
+    
+    if (existing) {
+      // Update existing record
+      const updates: Partial<TradedTokenHistory> = {
+        lastTradedAt: new Date(),
+      };
+      
+      if (action === "buy") {
+        updates.totalBuys = existing.totalBuys + 1;
+        updates.totalBoughtSol = existing.totalBoughtSol + amountSol;
+      } else {
+        updates.totalSells = existing.totalSells + 1;
+        updates.totalSoldSol = existing.totalSoldSol + amountSol;
+        updates.realizedPnlSol = (existing.totalSoldSol + amountSol) - existing.totalBoughtSol;
+      }
+      
+      const [updated] = await db.update(tradedTokenHistory)
+        .set(updates)
+        .where(eq(tradedTokenHistory.id, existing.id))
+        .returning();
+      return updated;
+    } else {
+      // Create new record (first trade of this token)
+      const [created] = await db.insert(tradedTokenHistory).values({
+        agentId,
+        tokenMint,
+        tokenSymbol,
+        tokenName,
+        totalBuys: action === "buy" ? 1 : 0,
+        totalSells: action === "sell" ? 1 : 0,
+        totalBoughtSol: action === "buy" ? amountSol : 0,
+        totalSoldSol: action === "sell" ? amountSol : 0,
+        realizedPnlSol: 0,
+      }).returning();
+      return created;
+    }
   }
 
   // Privacy Layer - Shielded Accounts
