@@ -20,6 +20,8 @@ import {
   Shield,
   Settings,
   Coins,
+  Lock,
+  Landmark,
 } from "lucide-react";
 import { SiX, SiGithub } from "react-icons/si";
 import { Button } from "@/components/ui/button";
@@ -42,6 +44,11 @@ const navigationItems = [
     icon: Coins,
   },
   {
+    title: "Lending",
+    url: "/lending",
+    icon: Landmark,
+  },
+  {
     title: "Fleet",
     url: "/fleet",
     icon: Network,
@@ -60,6 +67,11 @@ const navigationItems = [
     title: "ZK Proofs",
     url: "/proofs",
     icon: Shield,
+  },
+  {
+    title: "Privacy",
+    url: "/privacy",
+    icon: Lock,
   },
 ];
 
