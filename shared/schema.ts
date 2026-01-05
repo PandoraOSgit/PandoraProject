@@ -48,6 +48,7 @@ export const agents = pgTable("agents", {
   encryptedPrivateKey: text("encrypted_private_key"),
   walletBalance: real("wallet_balance").notNull().default(0),
   spendingLimit: real("spending_limit").notNull().default(1),
+  tradeAmount: real("trade_amount").notNull().default(0.01),
   dailySpent: real("daily_spent").notNull().default(0),
   lastSpendingReset: timestamp("last_spending_reset"),
   goal: text("goal").notNull(),
@@ -96,6 +97,7 @@ export const fleets = pgTable("fleets", {
   description: text("description"),
   strategy: text("strategy"),
   status: text("status").notNull().default("idle"),
+  ownerWallet: text("owner_wallet").notNull(),
   agentCount: integer("agent_count").notNull().default(0),
   totalVolume: real("total_volume").notNull().default(0),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
@@ -215,6 +217,72 @@ export const insertAgentDecisionSchema = createInsertSchema(agentDecisions).omit
 
 export type InsertAgentDecision = z.infer<typeof insertAgentDecisionSchema>;
 export type AgentDecision = typeof agentDecisions.$inferSelect;
+
+// Agent Holdings table - Track token positions with entry prices for P/L
+export const agentHoldings = pgTable("agent_holdings", {
+  id: serial("id").primaryKey(),
+  agentId: integer("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  tokenMint: text("token_mint").notNull(),
+  tokenSymbol: text("token_symbol").notNull(),
+  tokenName: text("token_name"),
+  quantity: real("quantity").notNull().default(0),
+  entryPriceSol: real("entry_price_sol").notNull(),
+  currentPriceSol: real("current_price_sol"),
+  unrealizedPnlSol: real("unrealized_pnl_sol").default(0),
+  unrealizedPnlPercent: real("unrealized_pnl_percent").default(0),
+  status: text("status").notNull().default("open"),
+  entryTimestamp: timestamp("entry_timestamp").default(sql`CURRENT_TIMESTAMP`).notNull(),
+  lastUpdatedAt: timestamp("last_updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+
+export const agentHoldingsRelations = relations(agentHoldings, ({ one }) => ({
+  agent: one(agents, {
+    fields: [agentHoldings.agentId],
+    references: [agents.id],
+  }),
+}));
+
+export const insertAgentHoldingSchema = createInsertSchema(agentHoldings).omit({
+  id: true,
+  entryTimestamp: true,
+  lastUpdatedAt: true,
+});
+
+export type InsertAgentHolding = z.infer<typeof insertAgentHoldingSchema>;
+export type AgentHolding = typeof agentHoldings.$inferSelect;
+
+// Agent Traded Token History - PERMANENT record of all tokens ever traded (NEVER deleted)
+// This ensures agent never re-buys tokens that were already bought and sold
+export const tradedTokenHistory = pgTable("traded_token_history", {
+  id: serial("id").primaryKey(),
+  agentId: integer("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  tokenMint: text("token_mint").notNull(),
+  tokenSymbol: text("token_symbol").notNull(),
+  tokenName: text("token_name"),
+  firstBoughtAt: timestamp("first_bought_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+  lastTradedAt: timestamp("last_traded_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+  totalBuys: integer("total_buys").notNull().default(1),
+  totalSells: integer("total_sells").notNull().default(0),
+  totalBoughtSol: real("total_bought_sol").notNull().default(0),
+  totalSoldSol: real("total_sold_sol").notNull().default(0),
+  realizedPnlSol: real("realized_pnl_sol").notNull().default(0),
+});
+
+export const tradedTokenHistoryRelations = relations(tradedTokenHistory, ({ one }) => ({
+  agent: one(agents, {
+    fields: [tradedTokenHistory.agentId],
+    references: [agents.id],
+  }),
+}));
+
+export const insertTradedTokenHistorySchema = createInsertSchema(tradedTokenHistory).omit({
+  id: true,
+  firstBoughtAt: true,
+  lastTradedAt: true,
+});
+
+export type InsertTradedTokenHistory = z.infer<typeof insertTradedTokenHistorySchema>;
+export type TradedTokenHistory = typeof tradedTokenHistory.$inferSelect;
 
 // ============================================
 // ZK Privacy Layer Tables
@@ -445,3 +513,53 @@ export const insertZkmlInferenceProofSchema = createInsertSchema(zkmlInferencePr
 
 export type InsertZkmlInferenceProof = z.infer<typeof insertZkmlInferenceProofSchema>;
 export type ZkmlInferenceProof = typeof zkmlInferenceProofs.$inferSelect;
+
+// Lending Protocol enum values
+export const lendingProtocolValues = ["solend", "marginfi"] as const;
+export type LendingProtocol = typeof lendingProtocolValues[number];
+
+// Lending Position status enum values
+export const lendingPositionStatusValues = ["active", "closed", "liquidated"] as const;
+export type LendingPositionStatus = typeof lendingPositionStatusValues[number];
+
+// Lending Positions - Track user lending/borrowing positions
+export const lendingPositions = pgTable("lending_positions", {
+  id: serial("id").primaryKey(),
+  ownerWallet: text("owner_wallet").notNull(),
+  agentId: integer("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  protocol: text("protocol").notNull(),
+  symbol: text("symbol").notNull(),
+  mint: text("mint").notNull(),
+  positionType: text("position_type").notNull(), // "deposit" or "borrow"
+  amount: real("amount").notNull().default(0),
+  amountUSD: real("amount_usd").notNull().default(0),
+  entryAPY: real("entry_apy").notNull().default(0),
+  currentAPY: real("current_apy").notNull().default(0),
+  earnedInterest: real("earned_interest").notNull().default(0),
+  owedInterest: real("owed_interest").notNull().default(0),
+  healthFactor: real("health_factor"),
+  status: text("status").notNull().default("active"),
+  txSignature: text("tx_signature"),
+  closedAt: timestamp("closed_at"),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+  updatedAt: timestamp("updated_at"),
+});
+
+export const lendingPositionsRelations = relations(lendingPositions, ({ one }) => ({
+  agent: one(agents, {
+    fields: [lendingPositions.agentId],
+    references: [agents.id],
+  }),
+}));
+
+export const insertLendingPositionSchema = createInsertSchema(lendingPositions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  closedAt: true,
+  earnedInterest: true,
+  owedInterest: true,
+});
+
+export type InsertLendingPosition = z.infer<typeof insertLendingPositionSchema>;
+export type LendingPosition = typeof lendingPositions.$inferSelect;
