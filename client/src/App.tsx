@@ -9,6 +9,7 @@ import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { WalletProvider } from "@/contexts/wallet-context";
 import { WalletButton } from "@/components/wallet-button";
+import { TradeSoundNotifier } from "@/components/trade-sound-notifier";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
 import AgentsPage from "@/pages/agents";
@@ -18,6 +19,8 @@ import AnalyticsPage from "@/pages/analytics";
 import ProofsPage from "@/pages/proofs";
 import SettingsPage from "@/pages/settings";
 import MemeCoinsPage from "@/pages/meme-coins";
+import LendingPage from "@/pages/lending";
+import PrivacyPage from "@/pages/privacy";
 
 function Router() {
   return (
@@ -25,10 +28,12 @@ function Router() {
       <Route path="/" component={Dashboard} />
       <Route path="/agents" component={AgentsPage} />
       <Route path="/meme-coins" component={MemeCoinsPage} />
+      <Route path="/lending" component={LendingPage} />
       <Route path="/fleet" component={FleetPage} />
       <Route path="/transactions" component={TransactionsPage} />
       <Route path="/analytics" component={AnalyticsPage} />
       <Route path="/proofs" component={ProofsPage} />
+      <Route path="/privacy" component={PrivacyPage} />
       <Route path="/settings" component={SettingsPage} />
       <Route component={NotFound} />
     </Switch>
@@ -47,6 +52,7 @@ function App() {
         <WalletProvider>
           <TooltipProvider>
             <SidebarProvider style={style as React.CSSProperties}>
+              <TradeSoundNotifier />
               <div className="flex h-screen w-full">
                 <AppSidebar />
                 <div className="flex flex-col flex-1 overflow-hidden">
