@@ -48,6 +48,15 @@ import {
   verifyInferenceProof,
   getZkMLStats,
   getModel,
+  createModelWithTrainingData,
+  createTrainingDataCommitment,
+  generateTrainingProvenanceProof,
+  verifyTrainingProvenance,
+  getTrainingProvenance,
+  prepareOnChainVerification,
+  generateSolanaVerifierInstruction,
+  getTrainingConcealmentStats,
+  type TrainingMetadata,
 } from "./services/zkml-templates";
 import {
   generateSolanaStealthKeyPair,
@@ -56,6 +65,22 @@ import {
   getStealthTransferInfo,
   verifyECDHRoundTrip,
 } from "./services/solana-stealth";
+import {
+  getAllPools,
+  getSolendPools,
+  getMarginfiPools,
+  getPoolBySymbol,
+  prepareDeposit,
+  prepareBorrow,
+  prepareWithdraw,
+  prepareRepay,
+  getUserPositions,
+  getLendingStats,
+  getYieldOpportunities,
+  getAILendingRecommendation,
+  getProtocolInfo,
+  type LendingProtocol,
+} from "./services/lending";
 
 export async function registerRoutes(server: Server, app: Express): Promise<void> {
   // Auth routes
@@ -353,9 +378,14 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     }
   });
 
-  app.get("/api/transactions", requireWalletAuth, async (req, res) => {
+  app.get("/api/transactions", async (req, res) => {
     try {
-      const owner = req.auth!.wallet;
+      const owner = req.query.owner as string | undefined;
+      
+      if (!owner) {
+        return res.status(400).json({ error: "Owner wallet required" });
+      }
+      
       const transactions = await storage.getTransactionsByOwner(owner);
       res.json(transactions);
     } catch (error) {
@@ -403,9 +433,14 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     }
   });
 
-  app.get("/api/zk-proofs", requireWalletAuth, async (req, res) => {
+  app.get("/api/zk-proofs", async (req, res) => {
     try {
-      const owner = req.auth!.wallet;
+      const owner = req.query.owner as string | undefined;
+      
+      if (!owner) {
+        return res.status(400).json({ error: "Owner wallet required" });
+      }
+      
       const proofs = await storage.getZkProofsByOwner(owner);
       res.json(proofs);
     } catch (error) {
@@ -1746,6 +1781,151 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     }
   });
 
+  app.post("/api/zkml/models/with-training", async (req, res) => {
+    try {
+      const { templateType, name, configOverrides, trainingData, trainingMetadata } = req.body;
+
+      if (!templateType || !name || !trainingData || !trainingMetadata) {
+        return res.status(400).json({
+          error: "templateType, name, trainingData, and trainingMetadata are required",
+        });
+      }
+
+      if (!trainingData.samples || !Array.isArray(trainingData.samples)) {
+        return res.status(400).json({ error: "trainingData.samples must be an array" });
+      }
+
+      if (!trainingData.labels || !Array.isArray(trainingData.labels)) {
+        return res.status(400).json({ error: "trainingData.labels must be an array" });
+      }
+
+      const template = listModelTemplates().find((t) => t.modelType === templateType);
+      if (!template) {
+        return res.status(400).json({ error: "Invalid template type" });
+      }
+
+      const config = { ...template.defaultConfig, ...configOverrides };
+      const result = createModelWithTrainingData(name, config, trainingData, trainingMetadata);
+
+      res.json({
+        model: result.model,
+        provenanceProof: result.provenanceProof,
+        message: "Model created with concealed training data. Only commitments are stored, never raw data.",
+      });
+    } catch (error) {
+      console.error("Error creating zkML model with training:", error);
+      res.status(500).json({ error: "Failed to create zkML model with training data" });
+    }
+  });
+
+  app.get("/api/zkml/models/:modelId/provenance", async (req, res) => {
+    try {
+      const { modelId } = req.params;
+      const provenance = getTrainingProvenance(modelId);
+
+      if (!provenance) {
+        return res.status(404).json({ error: "No training provenance found for this model" });
+      }
+
+      const model = getModel(modelId);
+      if (!model) {
+        return res.status(404).json({ error: "Model not found" });
+      }
+
+      const verification = verifyTrainingProvenance(provenance, model);
+
+      res.json({
+        provenance,
+        verification,
+        concealment: {
+          datasetHashOnly: true,
+          rawDataExposed: false,
+          samplesConcealed: provenance.trainingCommitment.sampleCount,
+          featuresConcealed: provenance.trainingCommitment.featureCount,
+        },
+      });
+    } catch (error) {
+      console.error("Error getting training provenance:", error);
+      res.status(500).json({ error: "Failed to get training provenance" });
+    }
+  });
+
+  app.post("/api/zkml/models/:modelId/verify-provenance", async (req, res) => {
+    try {
+      const { modelId } = req.params;
+
+      const model = getModel(modelId);
+      if (!model) {
+        return res.status(404).json({ error: "Model not found" });
+      }
+
+      const provenance = getTrainingProvenance(modelId);
+      if (!provenance) {
+        return res.status(404).json({ error: "No provenance proof found for this model" });
+      }
+
+      const result = verifyTrainingProvenance(provenance, model);
+
+      res.json({
+        verified: result.valid,
+        reason: result.reason,
+        details: result.details,
+        message: result.valid
+          ? "Training provenance verified. Model was trained on committed dataset without exposing raw data."
+          : "Provenance verification failed.",
+      });
+    } catch (error) {
+      console.error("Error verifying provenance:", error);
+      res.status(500).json({ error: "Failed to verify training provenance" });
+    }
+  });
+
+  app.post("/api/zkml/prepare-onchain", async (req, res) => {
+    try {
+      const { modelId, input } = req.body;
+
+      if (!modelId || !input) {
+        return res.status(400).json({ error: "modelId and input are required" });
+      }
+
+      const model = getModel(modelId);
+      if (!model) {
+        return res.status(404).json({ error: "Model not found" });
+      }
+
+      const inferenceProof = generateInferenceProof(model, input);
+      const onChainData = prepareOnChainVerification(model, inferenceProof);
+      const instruction = generateSolanaVerifierInstruction(onChainData);
+
+      res.json({
+        inferenceProof,
+        onChainData,
+        instruction,
+        message: "On-chain verification data prepared. Ready for Solana program submission.",
+        note: "Requires deployed Groth16 verifier program on Solana for actual on-chain verification.",
+      });
+    } catch (error) {
+      console.error("Error preparing on-chain verification:", error);
+      res.status(500).json({ error: "Failed to prepare on-chain verification" });
+    }
+  });
+
+  app.get("/api/zkml/training-stats", async (_req, res) => {
+    try {
+      const stats = getTrainingConcealmentStats();
+      const zkmlStats = getZkMLStats();
+
+      res.json({
+        trainingConcealment: stats,
+        zkml: zkmlStats,
+        message: "Training data is fully concealed. Only cryptographic commitments are stored.",
+      });
+    } catch (error) {
+      console.error("Error getting training stats:", error);
+      res.status(500).json({ error: "Failed to get training concealment stats" });
+    }
+  });
+
   // Privacy Layer Overview Stats
   app.get("/api/privacy/stats", async (_req, res) => {
     try {
@@ -1763,6 +1943,255 @@ export async function registerRoutes(server: Server, app: Express): Promise<void
     } catch (error) {
       console.error("Error getting privacy stats:", error);
       res.status(500).json({ error: "Failed to get privacy stats" });
+    }
+  });
+
+  // ============================================
+  // LENDING PROTOCOL ROUTES (Solend + MarginFi)
+  // ============================================
+
+  app.get("/api/lending/protocols", async (_req, res) => {
+    try {
+      const protocols = await getProtocolInfo();
+      res.json(protocols);
+    } catch (error) {
+      console.error("Error getting protocol info:", error);
+      res.status(500).json({ error: "Failed to get lending protocols" });
+    }
+  });
+
+  app.get("/api/lending/pools", async (req, res) => {
+    try {
+      const { protocol } = req.query;
+      
+      let pools;
+      if (protocol === "solend") {
+        pools = await getSolendPools();
+      } else if (protocol === "marginfi") {
+        pools = await getMarginfiPools();
+      } else {
+        pools = await getAllPools();
+      }
+      
+      res.json(pools);
+    } catch (error) {
+      console.error("Error getting lending pools:", error);
+      res.status(500).json({ error: "Failed to get lending pools" });
+    }
+  });
+
+  app.get("/api/lending/pools/:protocol/:symbol", async (req, res) => {
+    try {
+      const { protocol, symbol } = req.params;
+      
+      if (!["solend", "marginfi"].includes(protocol)) {
+        return res.status(400).json({ error: "Invalid protocol. Use 'solend' or 'marginfi'" });
+      }
+      
+      const pool = await getPoolBySymbol(protocol as LendingProtocol, symbol);
+      
+      if (!pool) {
+        return res.status(404).json({ error: `Pool ${symbol} not found on ${protocol}` });
+      }
+      
+      res.json(pool);
+    } catch (error) {
+      console.error("Error getting pool:", error);
+      res.status(500).json({ error: "Failed to get pool" });
+    }
+  });
+
+  app.get("/api/lending/opportunities", async (_req, res) => {
+    try {
+      const opportunities = await getYieldOpportunities();
+      res.json(opportunities);
+    } catch (error) {
+      console.error("Error getting yield opportunities:", error);
+      res.status(500).json({ error: "Failed to get yield opportunities" });
+    }
+  });
+
+  app.get("/api/lending/positions", async (req, res) => {
+    try {
+      const { owner, protocol } = req.query;
+      
+      if (!owner) {
+        return res.status(400).json({ error: "Owner wallet address is required" });
+      }
+      
+      const positions = await getUserPositions(
+        owner as string, 
+        protocol as LendingProtocol | undefined
+      );
+      
+      res.json(positions);
+    } catch (error) {
+      console.error("Error getting positions:", error);
+      res.status(500).json({ error: "Failed to get lending positions" });
+    }
+  });
+
+  app.get("/api/lending/stats", async (req, res) => {
+    try {
+      const { owner } = req.query;
+      
+      if (!owner) {
+        return res.status(400).json({ error: "Owner wallet address is required" });
+      }
+      
+      const stats = await getLendingStats(owner as string);
+      res.json(stats);
+    } catch (error) {
+      console.error("Error getting lending stats:", error);
+      res.status(500).json({ error: "Failed to get lending stats" });
+    }
+  });
+
+  app.post("/api/lending/prepare/deposit", async (req, res) => {
+    try {
+      const { protocol, symbol, amount, walletPublicKey } = req.body;
+      
+      if (!protocol || !symbol || !amount || !walletPublicKey) {
+        return res.status(400).json({ 
+          error: "protocol, symbol, amount, and walletPublicKey are required" 
+        });
+      }
+      
+      if (!["solend", "marginfi"].includes(protocol)) {
+        return res.status(400).json({ error: "Invalid protocol" });
+      }
+      
+      const result = await prepareDeposit({ protocol, symbol, amount, walletPublicKey });
+      
+      if (!result.pool) {
+        return res.status(404).json({ error: `Pool ${symbol} not found on ${protocol}` });
+      }
+      
+      res.json({
+        ...result,
+        message: `Deposit ${amount} ${symbol} to ${protocol}`,
+        estimatedAPY: (result.pool.depositAPY * 100).toFixed(2) + "%",
+      });
+    } catch (error) {
+      console.error("Error preparing deposit:", error);
+      res.status(500).json({ error: "Failed to prepare deposit" });
+    }
+  });
+
+  app.post("/api/lending/prepare/borrow", async (req, res) => {
+    try {
+      const { protocol, symbol, amount, walletPublicKey } = req.body;
+      
+      if (!protocol || !symbol || !amount || !walletPublicKey) {
+        return res.status(400).json({ 
+          error: "protocol, symbol, amount, and walletPublicKey are required" 
+        });
+      }
+      
+      if (!["solend", "marginfi"].includes(protocol)) {
+        return res.status(400).json({ error: "Invalid protocol" });
+      }
+      
+      const result = await prepareBorrow({ protocol, symbol, amount, walletPublicKey });
+      
+      if (!result.pool) {
+        return res.status(404).json({ error: `Pool ${symbol} not found on ${protocol}` });
+      }
+      
+      res.json({
+        ...result,
+        message: `Borrow ${amount} ${symbol} from ${protocol}`,
+        borrowAPY: (result.pool.borrowAPY * 100).toFixed(2) + "%",
+      });
+    } catch (error) {
+      console.error("Error preparing borrow:", error);
+      res.status(500).json({ error: "Failed to prepare borrow" });
+    }
+  });
+
+  app.post("/api/lending/prepare/withdraw", async (req, res) => {
+    try {
+      const { protocol, symbol, amount, walletPublicKey } = req.body;
+      
+      if (!protocol || !symbol || !amount || !walletPublicKey) {
+        return res.status(400).json({ 
+          error: "protocol, symbol, amount, and walletPublicKey are required" 
+        });
+      }
+      
+      if (!["solend", "marginfi"].includes(protocol)) {
+        return res.status(400).json({ error: "Invalid protocol" });
+      }
+      
+      const result = await prepareWithdraw({ protocol, symbol, amount, walletPublicKey });
+      
+      if (!result.pool) {
+        return res.status(404).json({ error: `Pool ${symbol} not found on ${protocol}` });
+      }
+      
+      res.json({
+        ...result,
+        message: `Withdraw ${amount} ${symbol} from ${protocol}`,
+      });
+    } catch (error) {
+      console.error("Error preparing withdraw:", error);
+      res.status(500).json({ error: "Failed to prepare withdraw" });
+    }
+  });
+
+  app.post("/api/lending/prepare/repay", async (req, res) => {
+    try {
+      const { protocol, symbol, amount, walletPublicKey } = req.body;
+      
+      if (!protocol || !symbol || !amount || !walletPublicKey) {
+        return res.status(400).json({ 
+          error: "protocol, symbol, amount, and walletPublicKey are required" 
+        });
+      }
+      
+      if (!["solend", "marginfi"].includes(protocol)) {
+        return res.status(400).json({ error: "Invalid protocol" });
+      }
+      
+      const result = await prepareRepay({ protocol, symbol, amount, walletPublicKey });
+      
+      if (!result.pool) {
+        return res.status(404).json({ error: `Pool ${symbol} not found on ${protocol}` });
+      }
+      
+      res.json({
+        ...result,
+        message: `Repay ${amount} ${symbol} to ${protocol}`,
+      });
+    } catch (error) {
+      console.error("Error preparing repay:", error);
+      res.status(500).json({ error: "Failed to prepare repay" });
+    }
+  });
+
+  app.get("/api/lending/recommendations", async (req, res) => {
+    try {
+      const { owner, riskTolerance } = req.query;
+      
+      if (!owner) {
+        return res.status(400).json({ error: "Owner wallet address is required" });
+      }
+      
+      const validRisk = ["conservative", "moderate", "aggressive"];
+      const risk = validRisk.includes(riskTolerance as string) 
+        ? (riskTolerance as "conservative" | "moderate" | "aggressive")
+        : "moderate";
+      
+      const recommendations = await getAILendingRecommendation(owner as string, risk);
+      
+      res.json({
+        recommendations,
+        riskTolerance: risk,
+        message: `AI-powered lending recommendations for ${risk} risk profile`,
+      });
+    } catch (error) {
+      console.error("Error getting recommendations:", error);
+      res.status(500).json({ error: "Failed to get lending recommendations" });
     }
   });
 }
